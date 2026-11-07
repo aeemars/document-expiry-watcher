@@ -1,0 +1,13 @@
+OFFICE EQUIPMENT PURCHASE RECEIPT & INVOICE
+Invoice Number: INV-2026-00481
+Vendor: OfficeDepot Direct
+Customer: Enterprise HQ
+Date of Issue: January 15, 2026
+Payment Method: Corporate Credit Card
+Total Amount: $1,450.00
+Payment Status: Paid in Full
+Items Purchased:
+1. Ergonomic Chairs (x4)
+2. Height-Adjustable Desks (x2)
+Note: Keep this receipt for tax deduction records.
+
