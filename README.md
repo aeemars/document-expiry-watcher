@@ -1,6 +1,6 @@
 # document-expiry-watcher
 
-![document-expiry-watcher](assets/document_expiry_watcher.png)
+![document-expiry-watcher](assets/document_expiry_watcher.jpg)
 
 Ask your NAS what is about to expire.
 
