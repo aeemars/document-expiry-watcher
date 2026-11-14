@@ -100,18 +100,36 @@ def parse_date_string(date_text: str) -> Tuple[Optional[date], bool, Optional[Li
             yr += 2000
         # If both p1 and p2 could be months (<= 12) and are not equal, it's ambiguous
         if 1 <= p1 <= 12 and 1 <= p2 <= 12 and p1 != p2:
-            r1 = f"{yr}-{p1:02d}-{p2:02d} (if MM/DD/YY: {date(yr, p1, p2).strftime('%B %d, %Y')})"
-            r2 = f"{yr}-{p2:02d}-{p1:02d} (if DD/MM/YY: {date(yr, p2, p1).strftime('%B %d, %Y')})"
-            return None, True, [r1, r2]
+            readings = []
+            for month, day, format_name in (
+                (p1, p2, "MM/DD/YY"),
+                (p2, p1, "DD/MM/YY"),
+            ):
+                try:
+                    parsed = date(yr, month, day)
+                except ValueError:
+                    continue
+                readings.append(
+                    f"{yr}-{month:02d}-{day:02d} "
+                    f"(if {format_name}: {parsed.strftime('%B %d, %Y')})"
+                )
+            return None, bool(readings), readings or None
         elif 1 <= p1 <= 12:
-            return date(yr, p1, p2), False, None
+            try:
+                return date(yr, p1, p2), False, None
+            except ValueError:
+                return None, False, None
         else:
-            return date(yr, p2, p1), False, None
+            try:
+                return date(yr, p2, p1), False, None
+            except ValueError:
+                return None, False, None
 
     # Text formats like "October 15, 2025" or "2026-11-27"
+    normalized_date_text = re.sub(r'(?<=\d)(?:st|nd|rd|th)\b', '', date_text, flags=re.IGNORECASE)
     for fmt in ('%B %d, %Y', '%b %d, %Y', '%Y-%m-%d', '%d %B %Y', '%B %d %Y'):
         try:
-            dt = datetime.strptime(date_text, fmt).date()
+            dt = datetime.strptime(normalized_date_text, fmt).date()
             return dt, False, None
         except ValueError:
             pass
@@ -148,7 +166,6 @@ def simulate_document_agent(file_meta: FileMetadata) -> DocumentExtraction:
             unreadable_reason=str(e)
         )
         
-    lines = content.splitlines()
     doc_kind = "Document"
     if "POLICY" in content.upper():
         doc_kind = "Insurance Policy"
@@ -171,6 +188,14 @@ def simulate_document_agent(file_meta: FileMetadata) -> DocumentExtraction:
         r'(Issue Date|Date of Issue|Start Date|Lease Commencement)[:\s]+([A-Za-z0-9,/\s\-]+?)(?:\.|$|\n)'
     ]
     
+    # Date pattern extraction helper
+    common_date_patterns = [
+        r'(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2}(?:st|nd|rd|th)?,?\s+\d{4}',
+        r'\d{1,2}(?:st|nd|rd|th)?\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4}',
+        r'\d{4}-\d{2}-\d{2}',
+        r'\d{1,2}/\d{1,2}/\d{2,4}',
+    ]
+
     for pat in date_patterns:
         for match in re.finditer(pat, content, re.IGNORECASE):
             label = match.group(1).strip()
@@ -178,6 +203,15 @@ def simulate_document_agent(file_meta: FileMetadata) -> DocumentExtraction:
             # Clean trailing words if any
             val = re.sub(r'\s+(Status|Coverage|Notice|Terms|Deposit|Notes|Arbitration|Section).*', '', val, flags=re.IGNORECASE).strip()
             
+            # Tidy date string: extract exact date substring if present (strips filler like "of", "is", "of this service contract is")
+            for dp in common_date_patterns:
+                m_date = re.search(dp, val, re.IGNORECASE)
+                if m_date:
+                    val = m_date.group(0).strip()
+                    break
+            else:
+                val = re.sub(r'^(?:of|is|on|at|of\s+this\s+[^:]*?\s+is)\s+', '', val, flags=re.IGNORECASE).strip()
+
             is_issue = any(il in label.lower() for il in ISSUE_LABELS)
             dt, is_ambig, readings = parse_date_string(val)
             
@@ -190,11 +224,14 @@ def simulate_document_agent(file_meta: FileMetadata) -> DocumentExtraction:
                 is_issue_date=is_issue
             ))
 
-    # Check for multiple conflicting expiry dates (e.g. In SLA)
+    # Multiple expiry dates in separately numbered clauses are conflicting.
     expiry_dates = [d for d in extracted_dates if not d.is_issue_date]
-    has_conflicting = False
-    if "Section 2.1" in content and "Section 8.4" in content:
-        has_conflicting = True
+    clause_lines = [
+        line for line in content.splitlines()
+        if re.search(r'\bsection\s+[\w.]+\s*:', line, re.IGNORECASE)
+        and re.search(r'\b(?:expiry|expiration|validity)\b.*\bdate\b', line, re.IGNORECASE)
+    ]
+    has_conflicting = len(clause_lines) > 1 and len(expiry_dates) > 1
 
     return DocumentExtraction(
         file_meta=file_meta,
@@ -234,16 +271,18 @@ def build_report(extractions: List[DocumentExtraction], today: date, window_days
             continue
 
         if doc.has_conflicting_dates:
-            date_summaries = "; ".join([f"{d.label}: '{d.date_str}'" for d in doc.dates if not d.is_issue_date])
+            conflicting_dates = [d for d in doc.dates if not d.is_issue_date]
+            date_summaries = " vs ".join([d.date_str for d in conflicting_dates])
+            label_summaries = " / ".join([d.label for d in conflicting_dates])
             rows.append(ReportRow(
                 group="Date unclear",
                 doc_kind=doc.document_kind,
                 file_name=doc.file_meta.name,
                 full_path=doc.file_meta.path,
                 date_as_written=date_summaries,
-                label="Multiple conflicting expiry dates",
+                label=label_summaries,
                 days_delta=None,
-                extra_note="Document has conflicting clauses"
+                extra_note="Multiple conflicting expiry dates in document clauses"
             ))
             continue
 

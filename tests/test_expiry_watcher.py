@@ -20,6 +20,7 @@ from datetime import date
 # Add parent directory to path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from tests.simulate_watcher import (
+    parse_date_string,
     simulate_file_agent,
     simulate_document_agent,
     build_report,
@@ -93,6 +94,12 @@ class TestDocumentExpiryWatcher(unittest.TestCase):
         self.assertIn("if MM/DD/YY", permit_row.extra_note)
         self.assertIn("if DD/MM/YY", permit_row.extra_note)
 
+        # Verify conflicting dates row has clean Date as Written text without prepositions
+        sla_row = next(r for r in unclear if "service_sla_conflicting" in r.file_name)
+        self.assertEqual(sla_row.date_as_written, "June 30, 2027 vs October 15, 2026")
+        self.assertNotIn("of June 30", sla_row.date_as_written)
+        self.assertNotIn("of this service contract", sla_row.date_as_written)
+
         # Verify No readable date group
         no_date = [r for r in rows if r.group == "No readable date"]
         no_date_files = [r.file_name for r in no_date]
@@ -137,6 +144,53 @@ class TestDocumentExpiryWatcher(unittest.TestCase):
         with tempfile.TemporaryDirectory() as empty_dir:
             files = simulate_file_agent(empty_dir)
             self.assertEqual(len(files), 0)
+
+    def test_invalid_numeric_date_is_unclear_not_an_exception(self):
+        """Malformed numeric dates must not abort the scan."""
+        self.assertEqual(parse_date_string("31/02/26"), (None, False, None))
+
+    def test_ordinal_date_is_readable(self):
+        """Ordinal suffixes are formatting, not a reason to reject a date."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "ordinal_warranty.txt")
+            with open(path, "w", encoding="utf-8") as file:
+                file.write("WARRANTY\nWarranty End Date: November 27th, 2026\n")
+
+            extraction = simulate_document_agent(simulate_file_agent(folder)[0])
+
+        self.assertEqual(extraction.dates[0].parsed_date, date(2026, 11, 27))
+
+    def test_conflict_detection_uses_sectioned_expiry_clauses(self):
+        """Conflict detection must not depend on specific section numbers."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sectioned_sla.txt")
+            with open(path, "w", encoding="utf-8") as file:
+                file.write(
+                    "SERVICE AGREEMENT\n"
+                    "Section 1.2: The expiry date is June 30, 2027.\n"
+                    "Section 9.1: The validity and expiry date is October 15, 2026.\n"
+                )
+
+            extraction = simulate_document_agent(simulate_file_agent(folder)[0])
+
+        self.assertTrue(extraction.has_conflicting_dates)
+
+    def test_section_numbers_without_conflicting_expiry_dates_are_not_conflict(self):
+        """Section names alone must not create an empty conflicting-date row."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "unrelated_sections.txt")
+            with open(path, "w", encoding="utf-8") as file:
+                file.write(
+                    "SERVICE AGREEMENT\n"
+                    "Section 2.1: Payment terms are due on receipt.\n"
+                    "Section 8.4: Arbitration follows local law.\n"
+                )
+
+            extraction = simulate_document_agent(simulate_file_agent(folder)[0])
+
+        _, rows, _ = build_report([extraction], today=TODAY)
+        self.assertFalse(extraction.has_conflicting_dates)
+        self.assertEqual(rows[0].group, "No readable date")
 
     def test_knowledge_agent_save_approval(self):
         """Verify Step 5 requires approval before saving note."""
